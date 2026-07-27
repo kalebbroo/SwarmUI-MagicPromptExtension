@@ -455,7 +455,40 @@ public class LLMAPICalls : MagicPromptAPI
             {
                 try
                 {
-                    messageContent.Media = mediaToken.ToObject<List<MediaContent>>();
+                    // Fix (Claude, 2026-07-27): the browser's actual JS always sends lowercase keys
+                    // ("type"/"data"/"mediaType"), but ToObject<List<MediaContent>>() was matching
+                    // case-sensitively against the PascalCase MediaContent properties and silently
+                    // failing to bind them - meaning every real vision request from the UI was
+                    // arriving here with an empty/unpopulated Media list, so no image ever actually
+                    // got attached to the outbound request. Parsing property-by-property with an
+                    // explicit case-insensitive lookup sidesteps whatever serializer configuration
+                    // was causing the mismatch, rather than depending on it being fixed elsewhere.
+                    static string GetPropertyCaseInsensitive(JObject obj, string name)
+                    {
+                        foreach (JProperty prop in obj.Properties())
+                        {
+                            if (string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase))
+                            {
+                                return prop.Value?.ToString();
+                            }
+                        }
+                        return null;
+                    }
+                    List<MediaContent> mediaList = [];
+                    foreach (JToken item in mediaToken)
+                    {
+                        if (item is not JObject mediaObj)
+                        {
+                            continue;
+                        }
+                        mediaList.Add(new MediaContent
+                        {
+                            Type = GetPropertyCaseInsensitive(mediaObj, "type"),
+                            Data = GetPropertyCaseInsensitive(mediaObj, "data"),
+                            MediaType = GetPropertyCaseInsensitive(mediaObj, "mediaType")
+                        });
+                    }
+                    messageContent.Media = mediaList;
                 }
                 catch (Exception ex)
                 {

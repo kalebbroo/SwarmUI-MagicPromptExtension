@@ -74,7 +74,11 @@ public static class BackendSchema
                 return media.Data;
             }
             ISImage img = image.ToIS;
-            int maxDimension = 256; // TODO: This needs to be tested and adjusted
+            // Fix (Claude, 2026-07-27): 256px was too aggressive for modern higher-resolution vision
+            // encoders (confirmed via direct testing: the exact same image reliably misidentified at
+            // 256px/quality-40 was reliably correct at full resolution against the same model). 1024px
+            // preserves much more real detail while still keeping payload size reasonable.
+            int maxDimension = 1024;
             if (img.Width > maxDimension || img.Height > maxDimension)
             {
                 float scaleFactor = maxDimension / (float)Math.Max(img.Width, img.Height);
@@ -82,8 +86,9 @@ public static class BackendSchema
                 int newHeight = (int)(img.Height * scaleFactor);
                 img.Mutate(i => i.Resize(newWidth, newHeight));
             }
-            // Set compression quality based on format TODO: This needs to be tested and adjusted
-            int quality = targetFormat == "PNG" ? 60 : 40;
+            // Fix (Claude, 2026-07-27): quality 40/60 was heavily lossy on top of the aggressive
+            // downscale above; 90 preserves detail much better at a modest size cost.
+            int quality = 90;
             ImageFile tempImage = new Image(ImageFile.ISImgToPngBytes(img), image.Type);
             ImageFile compressedImage = tempImage.ConvertTo(targetFormat, quality: quality);
             // Return just the base64 data (without the data:image/webp;base64, prefix)
@@ -152,12 +157,18 @@ public static class BackendSchema
             List<object> contentList = [];
             foreach (MediaContent media in content.Media)
             {
-                string imageData = CompressImageForVision(media, preferPngForBase64 ? "PNG" : "WEBP");
+                // Fix (Claude, 2026-07-27): WEBP was confirmed (via direct A/B testing, same image,
+                // format as the only variable) to be mishandled by at least one real vision model's
+                // decode pipeline even at near-lossless quality - the model would confidently describe
+                // unrelated content. JPEG was confirmed reliable in the same test and is what Ollama's
+                // own request-building code already uses (CompressImageForVision(m, "JPG") above),
+                // so this brings the OpenAI-compatible path in line with that already-proven choice.
+                string imageData = CompressImageForVision(media, preferPngForBase64 ? "PNG" : "JPG");
                 contentList.Add(new
                 {
                     type = "image_url",
                     image_url = media.Type == "base64"
-                        ? new { url = preferPngForBase64 ? $"data:image/png;base64,{imageData}" : $"data:image/webp;base64,{imageData}" }
+                        ? new { url = preferPngForBase64 ? $"data:image/png;base64,{imageData}" : $"data:image/jpeg;base64,{imageData}" }
                         : new { url = media.Data }
                 });
             }
@@ -179,7 +190,10 @@ public static class BackendSchema
                     model,
                     messages = messages.ToArray(),
                     max_tokens = 1000,
-                    temperature = 1.0,
+                    // Fix (Claude, 2026-07-27): vision/captioning wants low, near-deterministic sampling,
+                    // not the creative-chat default of 1.0 - confirmed via testing that high temperature
+                    // turns a marginal image into confidently-wrong, differently-wrong-each-time answers.
+                    temperature = 0.2,
                     stream = false,
                     seed
                 };
@@ -190,7 +204,7 @@ public static class BackendSchema
                 model,
                 messages = messages.ToArray(),
                 max_tokens = 1000,
-                temperature = 1.0,
+                temperature = 0.2,
                 stream = false
             };
         }
